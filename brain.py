@@ -1,0 +1,145 @@
+"""Model loading and chat orchestration."""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from config import (
+    ALLOW_DOWNLOAD,
+    CONTEXT_TURNS,
+    DEVICE,
+    INDEX_PATH,
+    MAX_NEW_TOKENS,
+    MODEL_ID,
+    MODEL_PATH,
+    RAG_TOP_K,
+    REPETITION_PENALTY,
+    SYSTEM_PROMPT,
+    TEMPERATURE,
+    TOP_P,
+)
+from memory import Memory
+from rag import LocalRAG
+
+
+class DeepDeepBrain:
+    def __init__(self, db_path: Path, index_path: Path):
+        self.memory = Memory(db_path)
+        self.rag = LocalRAG(index_path, top_k=RAG_TOP_K)
+        self.tokenizer = None
+        self.model = None
+        self.device = self._choose_device()
+        self.model_source = MODEL_PATH or MODEL_ID
+
+    @staticmethod
+    def _choose_device() -> str:
+        if DEVICE in {"cpu", "cuda", "mps"}:
+            if DEVICE == "cuda" and not torch.cuda.is_available():
+                raise RuntimeError("DEEPDEEP_DEVICE=cuda was requested, but CUDA is unavailable")
+            mps_backend = getattr(torch.backends, "mps", None)
+            if DEVICE == "mps" and (mps_backend is None or not mps_backend.is_available()):
+                raise RuntimeError("DEEPDEEP_DEVICE=mps was requested, but MPS is unavailable")
+            return DEVICE
+        if torch.cuda.is_available():
+            return "cuda"
+        if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+
+    def load_model(self, allow_download: Optional[bool] = None) -> None:
+        download = ALLOW_DOWNLOAD if allow_download is None else allow_download
+        local_only = not download
+        source = Path(self.model_source).expanduser() if MODEL_PATH else self.model_source
+        kwargs = {"local_files_only": local_only}
+        if self.device == "cpu":
+            kwargs["dtype"] = torch.float32
+        else:
+            kwargs["dtype"] = torch.float16
+
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(str(source), **kwargs)
+            self.model = AutoModelForCausalLM.from_pretrained(str(source), **kwargs)
+        except Exception as exc:
+            mode = "offline" if local_only else "download"
+            raise RuntimeError(
+                f"Could not load {self.model_source!r} in {mode} mode. "
+                "Download it once with `python main.py --download-model`, or set "
+                "DEEPDEEP_MODEL_PATH to an already-downloaded model directory. "
+                f"Original error: {exc}"
+            ) from exc
+        self.model.to(self.device)
+        self.model.eval()
+
+    def _build_messages(self, user_id: str, user_message: str) -> List[Dict[str, str]]:
+        system = SYSTEM_PROMPT
+        facts = self.memory.facts(user_id)
+        if facts:
+            system += "\n\nKnown facts about the user:\n" + "\n".join(
+                f"- {key}: {value}" for key, value in facts.items()
+            )
+        retrieved = self.rag.search(user_message, k=RAG_TOP_K)
+        if retrieved:
+            system += "\n\nRelevant local documents:\n" + "\n\n".join(
+                f"[{doc['source']}]\n{doc['text']}" for doc in retrieved
+            )
+        messages = [{"role": "system", "content": system}]
+        messages.extend(self.memory.recent_messages(user_id, CONTEXT_TURNS * 2))
+        messages.append({"role": "user", "content": user_message})
+        return messages
+
+    @torch.inference_mode()
+    def generate(self, user_id: str, user_message: str) -> str:
+        if self.model is None or self.tokenizer is None:
+            raise RuntimeError("The model is not loaded")
+        messages = self._build_messages(user_id, user_message)
+        prompt = self.tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        inputs = {key: value.to(self.device) for key, value in inputs.items()}
+        output = self.model.generate(
+            **inputs,
+            max_new_tokens=MAX_NEW_TOKENS,
+            do_sample=TEMPERATURE > 0,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
+            repetition_penalty=REPETITION_PENALTY,
+            pad_token_id=self.tokenizer.eos_token_id,
+        )
+        new_tokens = output[0, inputs["input_ids"].shape[1] :]
+        reply = self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        return reply or "I’m here — could you say that another way?"
+
+    def _extract_facts(self, user_id: str, message: str) -> None:
+        patterns = [
+            (r"\bmy name is\s+([A-Za-z][A-Za-z -]{1,40})", "name"),
+            (r"\bi (?:like|love|prefer)\s+(.{2,80})[.!?]?$", "preference"),
+            (r"\bi use\s+(.{2,80})[.!?]?$", "tools"),
+        ]
+        for pattern, key in patterns:
+            match = re.search(pattern, message, flags=re.IGNORECASE)
+            if match:
+                value = match.group(1).strip(" .,!?")
+                if value and len(value) <= 100:
+                    self.memory.set_fact(user_id, key, value)
+                    break
+
+    def chat(self, user_id: str, user_message: str) -> str:
+        self.memory.upsert_user(user_id)
+        self._extract_facts(user_id, user_message)
+        reply = self.generate(user_id, user_message)
+        self.memory.add_message(user_id, "user", user_message)
+        self.memory.add_message(user_id, "assistant", reply)
+        return reply
+
+    def remember_fact(self, user_id: str, key: str, value: str) -> None:
+        self.memory.upsert_user(user_id)
+        self.memory.set_fact(user_id, key, value)
+
+    def close(self) -> None:
+        self.memory.close()
