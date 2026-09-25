@@ -27,14 +27,14 @@ TOP_P = float(os.environ.get("DEEPDEEP_TOP_P", "0.9"))
 REPETITION_PENALTY = float(os.environ.get("DEEPDEEP_REPETITION_PENALTY", "1.08"))
 CONTEXT_TURNS = int(os.environ.get("DEEPDEEP_CONTEXT_TURNS", "8"))
 RAG_TOP_K = int(os.environ.get("DEEPDEEP_RAG_TOP_K", "4"))
+AUTO_RENAME_CHATS = os.environ.get("DEEPDEEP_AUTO_RENAME_CHATS", "1") == "1"
 
 SYSTEM_PROMPT = """You are DeepDeep, a private local AI assistant.
 You are friendly, direct, and honest. You help with everyday questions and
 software development. Use the user's local documents when they are relevant,
 but do not invent facts that are not in the conversation or documents. If you
-are unsure, say so. Keep answers useful and reasonably concise. You have no
-internet access during this conversation unless the user explicitly asks for
-web search."""
+are unsure, say so. Keep answers useful and reasonably concise. Web research
+context is included automatically when Bing is available."""
 
 
 def ensure_directories() -> None:

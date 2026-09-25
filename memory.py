@@ -10,14 +10,19 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 
+DEFAULT_CONVERSATION_TITLE = "New conversation"
+AUTO_TITLE_LIMIT = 60
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
 class Memory:
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, auto_rename_chats: bool = True):
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self.auto_rename_chats = auto_rename_chats
         self.conn.execute("PRAGMA journal_mode=WAL")
         self._create_tables()
 
@@ -78,7 +83,12 @@ class Memory:
         )
         self.conn.commit()
 
-    def create_conversation(self, user_id: str, title: str = "New conversation", commit: bool = True) -> str:
+    def create_conversation(
+        self,
+        user_id: str,
+        title: str = DEFAULT_CONVERSATION_TITLE,
+        commit: bool = True,
+    ) -> str:
         conversation_id = uuid.uuid4().hex
         timestamp = now()
         self.conn.execute(
@@ -112,6 +122,17 @@ class Memory:
         )
         self.conn.commit()
 
+    @staticmethod
+    def conversation_title_from_message(content: str) -> str:
+        """Create a short, readable title without sending chat content anywhere."""
+        title = " ".join(content.split()).strip()
+        if title.startswith("/web "):
+            title = title[5:].strip()
+        if len(title) <= AUTO_TITLE_LIMIT:
+            return title or DEFAULT_CONVERSATION_TITLE
+        shortened = title[: AUTO_TITLE_LIMIT - 1].rsplit(" ", 1)[0].rstrip(" .,!?;:")
+        return f"{shortened}…" if shortened else f"{title[:AUTO_TITLE_LIMIT - 1]}…"
+
     def conversation_messages(self, conversation_id: str, limit: int) -> List[Dict[str, str]]:
         rows = self.conn.execute(
             """SELECT role, content FROM messages
@@ -144,12 +165,18 @@ class Memory:
             (user_id, conversation_id, role, content, now()),
         )
         if role == "user":
-            self.conn.execute(
-                """UPDATE conversations
-                   SET title=CASE WHEN title='New conversation' THEN ? ELSE title END,
-                       updated_at=? WHERE conversation_id=? AND user_id=?""",
-                (content[:60] or "New conversation", now(), conversation_id, user_id),
-            )
+            if self.auto_rename_chats:
+                self.conn.execute(
+                    """UPDATE conversations
+                       SET title=CASE WHEN title='New conversation' THEN ? ELSE title END,
+                           updated_at=? WHERE conversation_id=? AND user_id=?""",
+                    (self.conversation_title_from_message(content), now(), conversation_id, user_id),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE conversations SET updated_at=? WHERE conversation_id=? AND user_id=?",
+                    (now(), conversation_id, user_id),
+                )
         else:
             self.conn.execute(
                 "UPDATE conversations SET updated_at=? WHERE conversation_id=? AND user_id=?",

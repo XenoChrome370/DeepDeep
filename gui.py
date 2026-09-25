@@ -15,6 +15,9 @@ from flask import Flask, jsonify, redirect, render_template_string, request, url
 from brain import DeepDeepBrain
 
 
+ATTACHMENT_EXTENSIONS = {".txt", ".md", ".py", ".json", ".csv"}
+MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024
+
 BG = "#f7f7f4"
 SIDEBAR = "#efefeb"
 PANEL = "#ffffff"
@@ -136,6 +139,12 @@ PAGE = """
     .command-description { display: block; margin-top: 2px; overflow: hidden; color: {{ muted }}; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
     .command-key { margin-left: auto; color: #aaa69d; font-family: "SFMono-Regular", Consolas, monospace; font-size: 11px; }
     .composer-row { display: flex; gap: 10px; align-items: flex-end; }
+    .attachments { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 4px 5px; }
+    .attachment { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border-radius: 7px; background: #f4ddd5; color: #704338; font-size: 11px; }
+    .attachment button { border: 0; padding: 0; background: transparent; color: #9b6254; font-size: 15px; line-height: 1; }
+    .attach { display: grid; place-items: center; flex: 0 0 auto; width: 43px; height: 43px; border: 1px solid {{ line }}; border-radius: 11px; color: {{ accent_dark }}; font-size: 22px; cursor: pointer; }
+    .attach:hover { background: #fff8f5; border-color: {{ accent }}; }
+    .attach input { display: none; }
     textarea { min-height: 50px; max-height: 170px; flex: 1; resize: none; border: 0; outline: 0; padding: 10px 4px 6px; color: {{ ink }}; background: transparent; line-height: 1.45; }
     textarea::placeholder { color: #aaa69d; }
     .send { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 76px; height: 43px; align-self: flex-end; padding: 0 13px; background: {{ accent }}; font-size: 13px; }
@@ -206,7 +215,8 @@ PAGE = """
               </button>
             {% endfor %}
           </div>
-          <div class="composer-row"><textarea id="message" name="message" placeholder="Start anywhere..." rows="1" required {% if not loaded %}disabled{% endif %}></textarea><button id="send" class="send" type="submit" {% if not loaded %}disabled{% endif %}><span class="send-label">Send</span><span class="send-arrow">↑</span></button></div>
+          <div id="attachments" class="attachments" aria-live="polite"></div>
+          <div class="composer-row"><textarea id="message" name="message" placeholder="Start anywhere..." rows="1" required {% if not loaded %}disabled{% endif %}></textarea><label class="attach" title="Attach text, Markdown, code, JSON, or CSV files"><input id="file-input" type="file" multiple accept=".txt,.md,.py,.json,.csv,text/plain,text/markdown,text/csv,application/json" {% if not loaded %}disabled{% endif %}>＋</label><button id="send" class="send" type="submit" {% if not loaded %}disabled{% endif %}><span class="send-label">Send</span><span class="send-arrow">↑</span></button></div>
         </div>
       </form>
       <div class="hint">Enter to send · Shift + Enter for a new line</div>
@@ -215,6 +225,9 @@ PAGE = """
   <script>
     const status = document.getElementById("status");
     const input = document.getElementById("message");
+    const fileInput = document.getElementById("file-input");
+    const attachmentList = document.getElementById("attachments");
+    const messages = document.getElementById("messages");
     const send = document.getElementById("send");
     const thinking = document.getElementById("thinking");
     const thinkingStage = document.getElementById("thinking-stage");
@@ -226,6 +239,24 @@ PAGE = """
     let thinkingTimer;
     let thinkingStageTimer;
     let thinkingStartedAt;
+    let selectedFiles = [];
+    function renderAttachments() {
+      attachmentList.replaceChildren(...selectedFiles.map((file, index) => {
+        const chip = document.createElement("span");
+        chip.className = "attachment";
+        chip.textContent = file.name;
+        const remove = document.createElement("button");
+        remove.type = "button"; remove.setAttribute("aria-label", "Remove " + file.name); remove.textContent = "×";
+        remove.addEventListener("click", () => { selectedFiles.splice(index, 1); renderAttachments(); });
+        chip.appendChild(remove);
+        return chip;
+      }));
+    }
+    fileInput.addEventListener("change", () => {
+      selectedFiles = [...selectedFiles, ...fileInput.files];
+      renderAttachments();
+      fileInput.value = "";
+    });
     function resizeInput() { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 170) + "px"; }
     async function refreshStatus() {
       try {
@@ -262,6 +293,17 @@ PAGE = """
     }
     commandOptions.forEach((option) => option.addEventListener("click", () => selectCommand(option)));
     function renameConversation(form) { const title = prompt("Conversation name:"); if (title === null) return false; form.title.value = title; return Boolean(title.trim()); }
+    function appendPendingMessage(content) {
+      const article = document.createElement("article");
+      article.className = "message user pending";
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      bubble.textContent = content;
+      article.appendChild(bubble);
+      messages.insertBefore(article, thinking);
+      requestAnimationFrame(scrollMessagesToBottom);
+      return article;
+    }
     function startThinking() {
       thinkingStartedAt = Date.now();
       let stageIndex = 0;
@@ -287,13 +329,23 @@ PAGE = """
     document.getElementById("chat-form").addEventListener("submit", async (event) => {
       event.preventDefault();
       if (!input.value.trim() || send.disabled) return;
+      const message = input.value.trim();
+      const pendingMessage = appendPendingMessage(message);
+      input.value = "";
+      resizeInput();
       send.disabled = true; input.disabled = true; status.textContent = "●  Thinking locally..."; send.querySelector(".send-label").textContent = "Thinking"; startThinking();
       try {
-        const response = await fetch(event.target.action, { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({message: input.value}) });
+        const body = new FormData();
+        body.append("message", message);
+        selectedFiles.forEach((file) => body.append("files", file, file.name));
+        const response = await fetch(event.target.action, { method: "POST", body });
         const data = await response.json();
         if (response.ok) window.location.href = data.redirect;
         else throw new Error(data.error || "Could not send message.");
       } catch (error) {
+        pendingMessage.remove();
+        input.value = message;
+        resizeInput();
         stopThinking();
         alert(error.message || "Could not send message.");
         send.disabled = false; input.disabled = false; send.querySelector(".send-label").textContent = "Send";
@@ -451,9 +503,24 @@ def create_app(brain: DeepDeepBrain, user_id: str) -> Flask:
             return jsonify(redirect=url_for("index", conversation_id=conversation_id))
         if not state["loaded"]:
             return jsonify(error=state["error"] or "The model is still warming up"), 503
+        attachments = []
+        for uploaded in request.files.getlist("files"):
+            filename = Path(uploaded.filename or "").name
+            if not filename:
+                continue
+            if Path(filename).suffix.lower() not in ATTACHMENT_EXTENSIONS:
+                return jsonify(error=f"Unsupported attachment type: {filename}"), 400
+            content = uploaded.read(MAX_ATTACHMENT_BYTES + 1)
+            if len(content) > MAX_ATTACHMENT_BYTES:
+                return jsonify(error=f"Attachment is too large (2 MB maximum): {filename}"), 400
+            try:
+                text = content.decode("utf-8")
+            except UnicodeDecodeError:
+                return jsonify(error=f"Attachment must be UTF-8 text: {filename}"), 400
+            attachments.append({"name": filename, "text": text})
         try:
             with model_lock:
-                brain.chat(user_id, conversation_id, message)
+                brain.chat(user_id, conversation_id, message, attachments=attachments)
         except Exception as exc:
             return jsonify(error=str(exc)), 500
         return jsonify(redirect=url_for("index", conversation_id=conversation_id))

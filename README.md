@@ -8,7 +8,7 @@ DeepDeep is a private local AI assistant built from the design in the pasted Dee
 - a terminal interface and an optional Flask web interface;
 - multiple saved conversations that can be switched or deleted in the browser;
 - an offline-by-default runtime policy.
-- optional web research that fetches pages and cites source URLs.
+- automatic web research when Bing is reachable, fetching pages and citing source URLs.
 
 ## Plan
 
@@ -52,6 +52,10 @@ locally, so starting a new conversation does not clear earlier chats. Select an
 earlier conversation to continue it, or delete that conversation and its messages.
 User facts saved in local memory are shared across conversations.
 
+New chats are automatically named from the first message (web-search commands use
+the search text), while a title you rename manually is preserved. Set
+`DEEPDEEP_AUTO_RENAME_CHATS=0` to keep the default `New conversation` title.
+
 ## Web research
 
 Web access is detected automatically at startup by checking Bing. DeepDeep sets
@@ -64,15 +68,23 @@ python main.py
 python main.py --gui
 ```
 
-Then send `/web your question` in the terminal or browser chat. DeepDeep searches
-Bing, fetches readable text from the top results, summarizes it locally,
-and includes inline citations plus a `Sources` section with the original URLs.
-Searches may fail for sites that block automated requests; local chat remains
-available when web access is disabled.
+Requests that appear to need fresh or external information (for example,
+current events, news, weather, prices, recommendations, comparisons, or an
+explicit request to look something up) search Bing before generating a response.
+DeepDeep fetches readable text from the top results and includes inline
+citations plus a `Sources` section with the original URLs. `/web your question`
+remains available to force an explicit web-only request. If Bing is unreachable
+at startup or a later search fails, automatic web search is disabled and local
+chat continues normally.
 
 While a response is being generated, the GUI shows the local processing stages
 and elapsed time. It does not expose private chain-of-thought text; the local
 model only provides its final answer.
+
+The GUI composer can attach one or more UTF-8 text, Markdown, Python, JSON, or
+CSV files (up to 2 MB each). Attachments are read by the local model for that
+request and are not added to the persistent document index; use `/add path` when
+you want a file to remain available through local retrieval.
 
 Run `python main.py --check` to verify the Python runtime without loading the model.
 

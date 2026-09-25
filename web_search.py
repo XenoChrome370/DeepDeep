@@ -15,6 +15,14 @@ MAX_PAGE_TEXT = 6_000
 CONNECTIVITY_TIMEOUT = 3
 
 
+class WebSearchUnavailable(RuntimeError):
+    """Raised when Bing cannot provide usable search context."""
+
+    def __init__(self, message: str, *, disable: bool = False) -> None:
+        super().__init__(message)
+        self.disable = disable
+
+
 class _TextParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
