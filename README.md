@@ -8,6 +8,7 @@ DeepDeep is a private local AI assistant built from the design in the pasted Dee
 - a terminal interface and an optional Flask web interface;
 - multiple saved conversations that can be switched or deleted in the browser;
 - an offline-by-default runtime policy.
+- optional web research that fetches pages and cites source URLs.
 
 ## Plan
 
@@ -51,6 +52,28 @@ locally, so starting a new conversation does not clear earlier chats. Select an
 earlier conversation to continue it, or delete that conversation and its messages.
 User facts saved in local memory are shared across conversations.
 
+## Web research
+
+Web access is detected automatically at startup by checking Bing. DeepDeep sets
+`DEEPDEEP_ALLOW_WEB=1` when Bing is reachable and `DEEPDEEP_ALLOW_WEB=0`
+otherwise:
+
+```bash
+python main.py
+# or
+python main.py --gui
+```
+
+Then send `/web your question` in the terminal or browser chat. DeepDeep searches
+Bing, fetches readable text from the top results, summarizes it locally,
+and includes inline citations plus a `Sources` section with the original URLs.
+Searches may fail for sites that block automated requests; local chat remains
+available when web access is disabled.
+
+While a response is being generated, the GUI shows the local processing stages
+and elapsed time. It does not expose private chain-of-thought text; the local
+model only provides its final answer.
+
 Run `python main.py --check` to verify the Python runtime without loading the model.
 
 ## Add your own knowledge
@@ -65,7 +88,7 @@ The index is stored locally in `data/index.json`. No cloud vector database or em
 
 ## Commands
 
-`/help`, `/clear`, `/remember key=value`, `/add path`, `/sources`, and `/quit` are available in the terminal chat.
+`/help`, `/clear`, `/remember key=value`, `/add path`, `/sources`, and `/quit` are available in the terminal chat. In the GUI, type `/` in the composer to open the command picker for `/clear`, `/remember`, `/add`, `/sources`, and `/web`.
 
 ## Important limits
 

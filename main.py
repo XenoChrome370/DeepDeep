@@ -39,7 +39,7 @@ def main() -> int:
         print(f"Device: {brain.device}")
         print(f"Model source: {brain.model_source}")
         print("Runtime dependencies: OK")
-        print("Offline policy: model loading will not access the network")
+        print(f"Bing web access: {'available' if brain.web_enabled else 'unavailable'}")
         brain.close()
         return 0
 

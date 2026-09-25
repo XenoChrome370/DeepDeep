@@ -22,6 +22,7 @@ HELP = """Commands:
   /remember KEY=VALUE           save a fact for this user
   /add PATH                     index a local text/markdown/code file
   /sources                      list indexed document sources
+  /web QUERY                    search the web and summarize cited sources (opt-in)
   /quit                         exit DeepDeep
 """
 

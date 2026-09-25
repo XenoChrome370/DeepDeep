@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -25,6 +26,7 @@ from config import (
 )
 from memory import Memory
 from rag import LocalRAG
+from web_search import bing_is_available, collect
 
 
 class DeepDeepBrain:
@@ -35,6 +37,8 @@ class DeepDeepBrain:
         self.model = None
         self.device = self._choose_device()
         self.model_source = MODEL_PATH or MODEL_ID
+        self.web_enabled = bing_is_available()
+        os.environ["DEEPDEEP_ALLOW_WEB"] = "1" if self.web_enabled else "0"
 
     @staticmethod
     def _choose_device() -> str:
@@ -103,11 +107,37 @@ class DeepDeepBrain:
         messages.append({"role": "user", "content": user_message})
         return messages
 
+    def _build_web_messages(self, user_id: str, conversation_id: str, query: str) -> List[Dict[str, str]]:
+        if not self.web_enabled:
+            raise RuntimeError("Bing is not reachable, so web search is disabled.")
+        results = collect(query)
+        if not results:
+            raise RuntimeError("Web search returned no readable results.")
+        sources = "\n\n".join(
+            f"[{index}] {item['title']}\nURL: {item['url']}\n{item['text']}"
+            for index, item in enumerate(results, 1)
+        )
+        system = (
+            SYSTEM_PROMPT.replace("You have no internet access during this conversation.", "")
+            + "\n\nWeb research results follow. Answer using only supported information, "
+            "note uncertainty, cite sources inline as [1], [2], etc., and include a "
+            "Sources section listing the URLs."
+            + "\n\n" + sources
+        )
+        messages = [{"role": "system", "content": system}]
+        messages.extend(self.memory.conversation_messages(conversation_id, CONTEXT_TURNS * 2))
+        messages.append({"role": "user", "content": query})
+        return messages
+
     @torch.inference_mode()
-    def generate(self, user_id: str, conversation_id: str, user_message: str) -> str:
+    def generate(self, user_id: str, conversation_id: str, user_message: str, web: bool = False) -> str:
         if self.model is None or self.tokenizer is None:
             raise RuntimeError("The model is not loaded")
-        messages = self._build_messages(user_id, conversation_id, user_message)
+        messages = (
+            self._build_web_messages(user_id, conversation_id, user_message)
+            if web
+            else self._build_messages(user_id, conversation_id, user_message)
+        )
         prompt = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
@@ -143,7 +173,11 @@ class DeepDeepBrain:
     def chat(self, user_id: str, conversation_id: str, user_message: str) -> str:
         self.memory.upsert_user(user_id)
         self._extract_facts(user_id, user_message)
-        reply = self.generate(user_id, conversation_id, user_message)
+        web = user_message.startswith("/web ")
+        prompt = user_message[5:].strip() if web else user_message
+        if not prompt:
+            raise ValueError("Use /web followed by a search query.")
+        reply = self.generate(user_id, conversation_id, prompt, web=web)
         self.memory.add_message(user_id, conversation_id, "user", user_message)
         self.memory.add_message(user_id, conversation_id, "assistant", reply)
         return reply

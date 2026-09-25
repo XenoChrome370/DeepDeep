@@ -21,7 +21,7 @@ MODEL_PATH = os.environ.get("DEEPDEEP_MODEL_PATH", "").strip()
 DEVICE = os.environ.get("DEEPDEEP_DEVICE", "auto").lower()
 ALLOW_DOWNLOAD = os.environ.get("DEEPDEEP_ALLOW_DOWNLOAD", "0") == "1"
 
-MAX_NEW_TOKENS = int(os.environ.get("DEEPDEEP_MAX_NEW_TOKENS", "256"))
+MAX_NEW_TOKENS = int(os.environ.get("DEEPDEEP_MAX_NEW_TOKENS", "1024"))
 TEMPERATURE = float(os.environ.get("DEEPDEEP_TEMPERATURE", "0.7"))
 TOP_P = float(os.environ.get("DEEPDEEP_TOP_P", "0.9"))
 REPETITION_PENALTY = float(os.environ.get("DEEPDEEP_REPETITION_PENALTY", "1.08"))
@@ -33,10 +33,10 @@ You are friendly, direct, and honest. You help with everyday questions and
 software development. Use the user's local documents when they are relevant,
 but do not invent facts that are not in the conversation or documents. If you
 are unsure, say so. Keep answers useful and reasonably concise. You have no
-internet access during this conversation."""
+internet access during this conversation unless the user explicitly asks for
+web search."""
 
 
 def ensure_directories() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     DOCS_DIR.mkdir(parents=True, exist_ok=True)
-
