@@ -51,7 +51,8 @@ def main() -> int:
             brain.close()
             return 0
         if args.gui:
-            # The web server starts immediately; gui.py loads the model in its own thread.
+            # The web server starts immediately; the application service loads
+            # the model in its own thread.
             run_gui(brain, args.user)
         else:
             brain.load_model()

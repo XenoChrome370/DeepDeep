@@ -81,10 +81,11 @@ While a response is being generated, the GUI shows the local processing stages
 and elapsed time. It does not expose private chain-of-thought text; the local
 model only provides its final answer.
 
-The GUI composer can attach one or more UTF-8 text, Markdown, Python, JSON, or
-CSV files (up to 2 MB each). Attachments are read by the local model for that
-request and are not added to the persistent document index; use `/add path` when
-you want a file to remain available through local retrieval.
+The GUI composer can attach up to ten UTF-8 text, Markdown, Python, JSON, or
+CSV files (up to 2 MB each and 80,000 total text characters). Attachments are
+read by the local model for that request and are not added to the persistent
+document index; use `/add path` when you want a file to remain available
+through local retrieval.
 
 Run `python main.py --check` to verify the Python runtime without loading the model.
 

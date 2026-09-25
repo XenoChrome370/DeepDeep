@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -18,14 +20,26 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def synchronized(method):
+    """Serialize access to the connection, which is shared by the GUI threads."""
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class Memory:
     def __init__(self, db_path: Path, auto_rename_chats: bool = True):
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
         self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self.auto_rename_chats = auto_rename_chats
         self.conn.execute("PRAGMA journal_mode=WAL")
         self._create_tables()
 
+    @synchronized
     def _create_tables(self) -> None:
         self.conn.executescript(
             """
@@ -72,6 +86,7 @@ class Memory:
             )
         self.conn.commit()
 
+    @synchronized
     def upsert_user(self, user_id: str, name: Optional[str] = None) -> None:
         timestamp = now()
         self.conn.execute(
@@ -83,6 +98,7 @@ class Memory:
         )
         self.conn.commit()
 
+    @synchronized
     def create_conversation(
         self,
         user_id: str,
@@ -100,6 +116,7 @@ class Memory:
             self.conn.commit()
         return conversation_id
 
+    @synchronized
     def list_conversations(self, user_id: str) -> List[Dict[str, str]]:
         rows = self.conn.execute(
             """SELECT conversation_id, title, created_at, updated_at
@@ -111,6 +128,7 @@ class Memory:
             for row in rows
         ]
 
+    @synchronized
     def rename_conversation(self, user_id: str, conversation_id: str, title: str) -> None:
         title = " ".join(title.split()).strip()
         if not title:
@@ -133,6 +151,7 @@ class Memory:
         shortened = title[: AUTO_TITLE_LIMIT - 1].rsplit(" ", 1)[0].rstrip(" .,!?;:")
         return f"{shortened}…" if shortened else f"{title[:AUTO_TITLE_LIMIT - 1]}…"
 
+    @synchronized
     def conversation_messages(self, conversation_id: str, limit: int) -> List[Dict[str, str]]:
         rows = self.conn.execute(
             """SELECT role, content FROM messages
@@ -142,6 +161,7 @@ class Memory:
         rows.reverse()
         return [{"role": role, "content": content} for role, content in rows]
 
+    @synchronized
     def add_message(
         self,
         user_id: str,
@@ -160,6 +180,8 @@ class Memory:
             )
         if role not in {"user", "assistant"} or content is None:
             raise ValueError("role must be 'user' or 'assistant', and content is required")
+        if not self.conversation_belongs_to_user(user_id, conversation_id):
+            raise ValueError("Conversation does not belong to this user")
         self.conn.execute(
             "INSERT INTO messages(user_id, conversation_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)",
             (user_id, conversation_id, role, content, now()),
@@ -184,6 +206,7 @@ class Memory:
             )
         self.conn.commit()
 
+    @synchronized
     def recent_messages(self, user_id: str, limit: int) -> List[Dict[str, str]]:
         rows = self.conn.execute(
             "SELECT role, content FROM messages WHERE user_id=? ORDER BY id DESC LIMIT ?",
@@ -192,6 +215,7 @@ class Memory:
         rows.reverse()
         return [{"role": role, "content": content} for role, content in rows]
 
+    @synchronized
     def delete_conversation(self, user_id: str, conversation_id: str) -> None:
         self.conn.execute(
             "DELETE FROM messages WHERE user_id=? AND conversation_id=?",
@@ -203,6 +227,7 @@ class Memory:
         )
         self.conn.commit()
 
+    @synchronized
     def facts(self, user_id: str) -> Dict[str, str]:
         row = self.conn.execute(
             "SELECT facts FROM users WHERE user_id=?", (user_id,)
@@ -215,6 +240,7 @@ class Memory:
         except (TypeError, ValueError, json.JSONDecodeError):
             return {}
 
+    @synchronized
     def set_fact(self, user_id: str, key: str, value: str) -> None:
         facts = self.facts(user_id)
         facts[key.strip()] = value.strip()
@@ -224,9 +250,25 @@ class Memory:
         )
         self.conn.commit()
 
-    def clear_history(self, user_id: str) -> None:
-        self.conn.execute("DELETE FROM messages WHERE user_id=?", (user_id,))
+    @synchronized
+    def conversation_belongs_to_user(self, user_id: str, conversation_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM conversations WHERE conversation_id=? AND user_id=?",
+            (conversation_id, user_id),
+        ).fetchone()
+        return row is not None
+
+    @synchronized
+    def clear_history(self, user_id: str, conversation_id: Optional[str] = None) -> None:
+        if conversation_id is None:
+            self.conn.execute("DELETE FROM messages WHERE user_id=?", (user_id,))
+        else:
+            self.conn.execute(
+                "DELETE FROM messages WHERE user_id=? AND conversation_id=?",
+                (user_id, conversation_id),
+            )
         self.conn.commit()
 
+    @synchronized
     def close(self) -> None:
         self.conn.close()

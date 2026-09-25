@@ -110,6 +110,13 @@ class DeepDeepBrain:
         )
         return f"{user_message}\n\nAttached files:\n{files}"
 
+    @staticmethod
+    def _session_message_with_attachments(user_message: str, attachments: List[Dict[str, str]]) -> str:
+        if not attachments:
+            return user_message
+        names = "\n- ".join(attachment["name"] for attachment in attachments)
+        return f"{user_message}\n\nAttached files:\n- {names}"
+
     def _build_messages(self, user_id: str, conversation_id: str, user_message: str) -> List[Dict[str, str]]:
         system = SYSTEM_PROMPT
         facts = self.memory.facts(user_id)
@@ -241,7 +248,8 @@ class DeepDeepBrain:
                 reply = self.generate(user_id, conversation_id, prompt, attachments=attachments)
         else:
             reply = self.generate(user_id, conversation_id, prompt, attachments=attachments)
-        self.memory.add_message(user_id, conversation_id, "user", user_message)
+        session_message = self._session_message_with_attachments(user_message, attachments or [])
+        self.memory.add_message(user_id, conversation_id, "user", session_message)
         self.memory.add_message(user_id, conversation_id, "assistant", reply)
         return reply
 

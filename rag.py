@@ -11,6 +11,7 @@ import math
 import re
 from collections import Counter
 from pathlib import Path
+import threading
 from typing import Dict, List
 
 
@@ -22,6 +23,7 @@ class LocalRAG:
         self.index_path = index_path
         self.top_k = top_k
         self.documents: List[Dict] = []
+        self._lock = threading.RLock()
         self._load()
 
     @staticmethod
@@ -45,66 +47,76 @@ class LocalRAG:
             return
         try:
             data = json.loads(self.index_path.read_text(encoding="utf-8"))
-            self.documents = data if isinstance(data, list) else []
+            self.documents = [
+                doc
+                for doc in data
+                if isinstance(doc, dict)
+                and isinstance(doc.get("source"), str)
+                and isinstance(doc.get("text"), str)
+            ] if isinstance(data, list) else []
         except (OSError, ValueError, json.JSONDecodeError):
             self.documents = []
 
     def _save(self) -> None:
-        self.index_path.parent.mkdir(parents=True, exist_ok=True)
-        self.index_path.write_text(
-            json.dumps(self.documents, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        with self._lock:
+            self.index_path.parent.mkdir(parents=True, exist_ok=True)
+            self.index_path.write_text(
+                json.dumps(self.documents, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
 
     def add_text(self, text: str, source: str = "manual") -> int:
-        chunks = self._chunks(text)
-        self.documents = [doc for doc in self.documents if doc.get("source") != source]
-        for number, chunk in enumerate(chunks):
-            self.documents.append({"source": source, "chunk": number, "text": chunk})
-        self._save()
-        return len(chunks)
+        with self._lock:
+            chunks = self._chunks(text)
+            self.documents = [doc for doc in self.documents if doc.get("source") != source]
+            for number, chunk in enumerate(chunks):
+                self.documents.append({"source": source, "chunk": number, "text": chunk})
+            self._save()
+            return len(chunks)
 
     def add_file(self, path: Path) -> int:
         text = path.read_text(encoding="utf-8", errors="ignore")
         return self.add_text(text, source=str(path))
 
     def add_folder(self, folder: Path) -> int:
-        total = 0
-        for path in sorted(folder.rglob("*")):
-            if path.is_file() and path.suffix.lower() in {".txt", ".md", ".py", ".json", ".csv"}:
-                total += self.add_file(path)
-        return total
+        with self._lock:
+            total = 0
+            for path in sorted(folder.rglob("*")):
+                if path.is_file() and path.suffix.lower() in {".txt", ".md", ".py", ".json", ".csv"}:
+                    total += self.add_file(path)
+            return total
 
     def search(self, query: str, k: int | None = None) -> List[Dict[str, str]]:
-        if not self.documents:
-            return []
-        query_counts = Counter(self._tokens(query))
-        if not query_counts:
-            return []
-        doc_counts = [Counter(self._tokens(doc["text"])) for doc in self.documents]
-        document_frequency = Counter()
-        for counts in doc_counts:
-            document_frequency.update(counts.keys())
-        total = len(doc_counts)
+        with self._lock:
+            if not self.documents:
+                return []
+            query_counts = Counter(self._tokens(query))
+            if not query_counts:
+                return []
+            doc_counts = [Counter(self._tokens(doc["text"])) for doc in self.documents]
+            document_frequency = Counter()
+            for counts in doc_counts:
+                document_frequency.update(counts.keys())
+            total = len(doc_counts)
 
-        def vector(counts: Counter) -> Dict[str, float]:
-            return {
-                token: frequency * math.log((total + 1) / (document_frequency[token] + 1))
-                for token, frequency in counts.items()
-            }
+            def vector(counts: Counter) -> Dict[str, float]:
+                return {
+                    token: frequency * math.log((total + 1) / (document_frequency[token] + 1))
+                    for token, frequency in counts.items()
+                }
 
-        query_vector = vector(query_counts)
-        query_norm = math.sqrt(sum(value * value for value in query_vector.values())) or 1.0
-        scored = []
-        for doc, counts in zip(self.documents, doc_counts):
-            doc_vector = vector(counts)
-            doc_norm = math.sqrt(sum(value * value for value in doc_vector.values())) or 1.0
-            score = sum(query_vector.get(key, 0.0) * value for key, value in doc_vector.items())
-            score /= query_norm * doc_norm
-            if score > 0:
-                scored.append((score, doc))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        return [doc for _, doc in scored[: k or self.top_k]]
+            query_vector = vector(query_counts)
+            query_norm = math.sqrt(sum(value * value for value in query_vector.values())) or 1.0
+            scored = []
+            for doc, counts in zip(self.documents, doc_counts):
+                doc_vector = vector(counts)
+                doc_norm = math.sqrt(sum(value * value for value in doc_vector.values())) or 1.0
+                score = sum(query_vector.get(key, 0.0) * value for key, value in doc_vector.items())
+                score /= query_norm * doc_norm
+                if score > 0:
+                    scored.append((score, doc))
+            scored.sort(key=lambda item: item[0], reverse=True)
+            return [doc for _, doc in scored[: k or self.top_k]]
 
     def sources(self) -> List[str]:
-        return sorted({str(doc.get("source", "")) for doc in self.documents})
-
+        with self._lock:
+            return sorted({str(doc.get("source", "")) for doc in self.documents})

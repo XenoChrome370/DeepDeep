@@ -2,21 +2,22 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from html import escape
-from pathlib import Path
-import shlex
-import threading
+from html import escape, unescape
+import re
 from typing import Any
+from urllib.parse import urlsplit
 
 import markdown  # pyright: ignore[reportMissingModuleSource]
 from flask import Flask, jsonify, redirect, render_template_string, request, url_for
 
+from application import (
+    AttachmentError,
+    ConversationNotFound,
+    ConversationService,
+    ModelUnavailable,
+)
 from brain import DeepDeepBrain
 
-
-ATTACHMENT_EXTENSIONS = {".txt", ".md", ".py", ".json", ".csv"}
-MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024
 
 BG = "#f7f7f4"
 SIDEBAR = "#efefeb"
@@ -50,10 +51,10 @@ PAGE = """
     button, input, textarea { font: inherit; }
     button, .button { cursor: pointer; }
     button:focus-visible, a:focus-visible, textarea:focus-visible { outline: 3px solid #efb3a3; outline-offset: 2px; }
-    .app { display: grid; grid-template-columns: 286px minmax(0, 1fr); height: 100vh; min-height: 100vh; }
-    aside { position: sticky; top: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; background: {{ sidebar }}; border-right: 1px solid {{ line }}; padding: 26px 18px 18px; }
-    main { display: flex; flex-direction: column; width: min(100%, 1040px); height: 100vh; min-height: 0; overflow: hidden; padding: 28px 42px 25px; margin: 0 auto; }
-    .brand { display: flex; align-items: center; gap: 11px; margin: 0 8px 29px; }
+    .app { display: grid; grid-template-columns: 278px minmax(0, 1fr); height: 100vh; min-height: 100vh; }
+    aside { position: sticky; top: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; background: linear-gradient(180deg, {{ sidebar }} 0%, {{ bg }} 100%); border-right: 1px solid {{ line }}; padding: 26px 18px 18px; }
+    main { display: flex; flex-direction: column; width: min(100%, 1080px); height: 100vh; min-height: 0; overflow: hidden; padding: 28px 46px 25px; margin: 0 auto; }
+    .brand { display: flex; align-items: center; gap: 11px; margin: 0 8px 31px; }
     .mark { display: grid; place-items: center; flex: 0 0 auto; width: 38px; height: 38px; border-radius: 13px; background: {{ ink }}; color: #ffd5c7; font-size: 21px; font-weight: 700; box-shadow: 0 5px 12px #26252218; }
     .brand strong { display: block; font-size: 17px; letter-spacing: -.2px; }
     .brand .caption { display: block; margin-top: 3px; }
@@ -61,7 +62,7 @@ PAGE = """
     .caption { font-size: 12px; }
     .eyebrow { color: {{ muted }}; font-size: 10px; font-weight: 800; letter-spacing: 1.4px; }
     .new-chat, .send { border: 0; color: white; background: {{ ink }}; font-weight: 700; border-radius: 11px; transition: transform .18s ease, background .18s ease, box-shadow .18s ease; }
-    .new-chat { width: 100%; padding: 12px 14px; text-align: left; margin-bottom: 28px; box-shadow: 0 4px 10px #26252210; }
+    .new-chat { width: 100%; padding: 12px 14px; text-align: left; margin-bottom: 28px; box-shadow: 0 4px 10px #26252210; letter-spacing: -.1px; }
     .new-chat:hover { background: #3c3a35; }
     .new-chat:active, .send:active { transform: translateY(1px); }
     .conversation-list { display: grid; gap: 3px; margin-top: 10px; max-height: calc(100vh - 190px); overflow-y: auto; }
@@ -84,7 +85,8 @@ PAGE = """
     .status::first-letter { color: {{ accent }}; }
     .status.ready { color: #4f8a61; }
     .hero, .composer { background: {{ panel }}; border: 1px solid {{ line }}; border-radius: 20px; }
-    .hero { position: relative; overflow: hidden; padding: 34px 36px 31px; box-shadow: 0 14px 36px #26252208; }
+    .hero { position: relative; overflow: hidden; padding: 38px 39px 33px; background: linear-gradient(135deg, {{ panel }} 0%, #fffaf8 100%); box-shadow: 0 14px 36px #26252208; }
+    .hero::before { content: ""; position: absolute; width: 260px; height: 260px; right: -95px; bottom: -155px; border-radius: 50%; background: #f4ddd588; pointer-events: none; }
     .hero::after { content: "✦"; position: absolute; right: 35px; top: 15px; color: #f0d7ce; font-size: 84px; line-height: 1; transform: rotate(12deg); pointer-events: none; }
     .hero-intro { display: flex; gap: 18px; align-items: flex-start; position: relative; z-index: 1; }
     .hero .mark { width: 57px; height: 57px; border-radius: 18px; font-size: 28px; }
@@ -108,9 +110,12 @@ PAGE = """
     .message p:last-child { margin-bottom: 0; }
     .message.user { display: flex; justify-content: flex-end; }
     .message.user .bubble { max-width: min(80%, 700px); padding: 13px 16px; border: 1px solid #efd0c5; border-radius: 16px 16px 4px 16px; background: #f4ddd5; color: #55352d; box-shadow: 0 4px 12px #d86f5510; }
+    .message.user .bubble.optimistic-bubble { white-space: pre-wrap; }
+    .message-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .message-attachment { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; border: 1px solid #e7bfb2; border-radius: 7px; background: #fff7f3; color: #704338; font-size: 11px; white-space: normal; }
     .assistant { display: flex; gap: 12px; align-items: flex-start; }
     .assistant-avatar { display: grid; place-items: center; flex: 0 0 auto; width: 28px; height: 28px; margin-top: 1px; border: 1px solid #efc5b8; border-radius: 10px; background: #fff8f5; color: {{ accent }}; font-size: 15px; }
-    .message-content { max-width: 760px; min-width: 0; }
+    .message-content { max-width: 760px; min-width: 0; padding-top: 1px; }
     .speaker { margin: 1px 0 4px; color: #8a867e; font-size: 10px; font-weight: 800; letter-spacing: .8px; }
     .thinking { display: none; gap: 12px; align-items: flex-start; margin: 0 0 25px; color: {{ muted }}; animation: rise-in .24s ease both; }
     .thinking.visible { display: flex; }
@@ -164,9 +169,9 @@ PAGE = """
 <body>
   <div class="app">
     <aside>
-      <div class="brand"><span class="mark">✦</span><div><strong>DeepDeep</strong><span class="caption">private local AI</span></div></div>
-      <form method="post" action="{{ url_for('new_conversation') }}"><button class="new-chat" type="submit">＋ &nbsp; New conversation</button></form>
-      <div class="eyebrow">CHATS</div>
+      <div class="brand"><span class="mark">✦</span><div><strong>DeepDeep</strong><span class="caption">your local thinking partner</span></div></div>
+      <form method="post" action="{{ url_for('new_conversation') }}"><button class="new-chat" type="submit">＋ &nbsp; Start a new thought</button></form>
+      <div class="eyebrow">YOUR THREADS</div>
       <div class="conversation-list">
         {% for conversation in conversations %}
           <div class="conversation {% if conversation.conversation_id == current_id %}active{% endif %}">
@@ -178,11 +183,11 @@ PAGE = """
       </div>
     </aside>
     <main>
-      <div class="topbar"><div class="breadcrumb"><span class="page-title">Your thinking space</span><span class="topbar-slash">/</span><span class="muted">DeepDeep</span></div><span id="status" class="status {% if loaded %}ready{% endif %}" aria-live="polite">● &nbsp;{{ status }}</span></div>
+      <div class="topbar"><div class="breadcrumb"><span class="page-title">A quiet place to think</span><span class="topbar-slash">/</span><span class="muted">DeepDeep</span></div><span id="status" class="status {% if loaded %}ready{% endif %}" aria-live="polite">● &nbsp;{{ status }}</span></div>
       {% if not messages %}
         <section class="hero">
-          <div class="hero-intro"><span class="mark" aria-hidden="true">✦</span><div><div class="hero-kicker">PRIVATE LOCAL COMPANION</div><h1>A little space for big thoughts.</h1><p>Think out loud, make something, or find your way through a tricky problem. I’m here to help you find the next clear step.</p><div class="hero-note"><span class="dot"></span><span>Quiet, local, and ready when you are.</span></div></div></div>
-          <hr><div class="suggestions-header"><div class="eyebrow">A PLACE TO START</div><span class="caption">Choose a prompt or make your own</span></div>
+          <div class="hero-intro"><span class="mark" aria-hidden="true">✦</span><div><div class="hero-kicker">THOUGHTFUL LOCAL COMPANION</div><h1>Let’s make the next step clearer.</h1><p>Bring me a rough idea, a half-written note, or a tricky question. We’ll sort through it together—calmly, clearly, and one useful step at a time.</p><div class="hero-note"><span class="dot"></span><span>Private by default · unhurried by design.</span></div></div></div>
+          <hr><div class="suggestions-header"><div class="eyebrow">A PLACE TO BEGIN</div><span class="caption">Pick a direction, or start anywhere</span></div>
           <div class="suggestions">
             {% for prompt in prompts %}<button class="suggestion" type="button" onclick="usePrompt({{ prompt|tojson }})"><span class="suggestion-icon">✦</span><span>{{ prompt }}</span><span class="arrow">↗</span></button>{% endfor %}
           </div>
@@ -198,14 +203,14 @@ PAGE = """
         <div id="thinking" class="thinking" role="status" aria-live="polite" aria-hidden="true">
           <div class="thinking-avatar" aria-hidden="true">✦</div>
           <div class="thinking-body">
-            <div class="thinking-title">DEEPDEEP IS WORKING</div>
+            <div class="thinking-title">DEEPDEEP IS WITH YOU</div>
             <div class="thinking-stage"><span id="thinking-stage">Reading your message</span><span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span></div>
             <div id="thinking-time" class="thinking-time">0s</div>
           </div>
         </div>
       </section>
       <form id="chat-form" class="composer" method="post" action="{{ url_for('chat', conversation_id=current_id) }}">
-        <div class="composer-meta"><span>What’s on your mind?</span><span class="privacy-mini"><span class="privacy-dot"></span> Stays on this device</span></div>
+        <div class="composer-meta"><span>What are you working through?</span><span class="privacy-mini"><span class="privacy-dot"></span> Private on this device</span></div>
         <div class="composer-wrap">
           <div id="command-menu" class="command-menu" role="listbox" aria-label="Commands">
             <div class="command-menu-header">COMMANDS</div>
@@ -216,10 +221,10 @@ PAGE = """
             {% endfor %}
           </div>
           <div id="attachments" class="attachments" aria-live="polite"></div>
-          <div class="composer-row"><textarea id="message" name="message" placeholder="Start anywhere..." rows="1" required {% if not loaded %}disabled{% endif %}></textarea><label class="attach" title="Attach text, Markdown, code, JSON, or CSV files"><input id="file-input" type="file" multiple accept=".txt,.md,.py,.json,.csv,text/plain,text/markdown,text/csv,application/json" {% if not loaded %}disabled{% endif %}>＋</label><button id="send" class="send" type="submit" {% if not loaded %}disabled{% endif %}><span class="send-label">Send</span><span class="send-arrow">↑</span></button></div>
+          <div class="composer-row"><textarea id="message" name="message" placeholder="Ask a question, paste a draft, or start with a thought…" rows="1" required {% if not loaded %}disabled{% endif %}></textarea><label class="attach" title="Attach text, Markdown, code, JSON, or CSV files"><input id="file-input" type="file" multiple accept=".txt,.md,.py,.json,.csv,text/plain,text/markdown,text/csv,application/json" {% if not loaded %}disabled{% endif %}>＋</label><button id="send" class="send" type="submit" {% if not loaded %}disabled{% endif %}><span class="send-label">Send</span><span class="send-arrow">↑</span></button></div>
         </div>
       </form>
-      <div class="hint">Enter to send · Shift + Enter for a new line</div>
+      <div class="hint">Enter to send · Shift + Enter for a new line · Type / for tools</div>
     </main>
   </div>
   <script>
@@ -227,18 +232,19 @@ PAGE = """
     const input = document.getElementById("message");
     const fileInput = document.getElementById("file-input");
     const attachmentList = document.getElementById("attachments");
-    const messages = document.getElementById("messages");
     const send = document.getElementById("send");
     const thinking = document.getElementById("thinking");
     const thinkingStage = document.getElementById("thinking-stage");
     const thinkingTime = document.getElementById("thinking-time");
-    const thinkingStages = ["Reading your message", "Checking local conversation context", "Searching local documents", "Generating a response"];
+    const thinkingStages = ["Taking in what you mean", "Checking our local context", "Looking through local notes", "Finding a useful next step"];
     const commandMenu = document.getElementById("command-menu");
     const commandOptions = [...commandMenu.querySelectorAll(".command-option")];
+    const messages = document.getElementById("messages");
     let activeCommandIndex = 0;
     let thinkingTimer;
     let thinkingStageTimer;
     let thinkingStartedAt;
+    let requestInFlight = false;
     let selectedFiles = [];
     function renderAttachments() {
       attachmentList.replaceChildren(...selectedFiles.map((file, index) => {
@@ -264,8 +270,9 @@ PAGE = """
         const data = await response.json();
         status.textContent = "●  " + data.status;
         status.classList.toggle("ready", data.loaded);
-        input.disabled = !data.loaded;
-        send.disabled = !data.loaded;
+        const canInteract = data.loaded && !requestInFlight;
+        input.disabled = !canInteract;
+        send.disabled = !canInteract;
       } catch (_) { /* The local server may be briefly busy while the model starts. */ }
     }
     function usePrompt(prompt) { input.value = prompt; resizeInput(); input.focus(); }
@@ -293,17 +300,6 @@ PAGE = """
     }
     commandOptions.forEach((option) => option.addEventListener("click", () => selectCommand(option)));
     function renameConversation(form) { const title = prompt("Conversation name:"); if (title === null) return false; form.title.value = title; return Boolean(title.trim()); }
-    function appendPendingMessage(content) {
-      const article = document.createElement("article");
-      article.className = "message user pending";
-      const bubble = document.createElement("div");
-      bubble.className = "bubble";
-      bubble.textContent = content;
-      article.appendChild(bubble);
-      messages.insertBefore(article, thinking);
-      requestAnimationFrame(scrollMessagesToBottom);
-      return article;
-    }
     function startThinking() {
       thinkingStartedAt = Date.now();
       let stageIndex = 0;
@@ -326,27 +322,58 @@ PAGE = """
       thinking.classList.remove("visible");
       thinking.setAttribute("aria-hidden", "true");
     }
+    function appendOptimisticMessage(message, files) {
+      const article = document.createElement("article");
+      article.className = "message user optimistic-message";
+      const bubble = document.createElement("div");
+      bubble.className = "bubble optimistic-bubble";
+      bubble.textContent = message;
+      if (files.length) {
+        const attachments = document.createElement("div");
+        attachments.className = "message-attachments";
+        attachments.setAttribute("aria-label", "Attachments");
+        files.forEach((file) => {
+          const attachment = document.createElement("span");
+          attachment.className = "message-attachment";
+          attachment.textContent = "📎 " + file.name;
+          attachments.appendChild(attachment);
+        });
+        bubble.appendChild(attachments);
+      }
+      article.appendChild(bubble);
+      messages.insertBefore(article, thinking);
+      requestAnimationFrame(scrollMessagesToBottom);
+      return article;
+    }
     document.getElementById("chat-form").addEventListener("submit", async (event) => {
       event.preventDefault();
-      if (!input.value.trim() || send.disabled) return;
+      if (!input.value.trim() || send.disabled || requestInFlight) return;
       const message = input.value.trim();
-      const pendingMessage = appendPendingMessage(message);
+      const files = [...selectedFiles];
+      const optimisticMessage = appendOptimisticMessage(message, files);
       input.value = "";
+      selectedFiles = [];
+      renderAttachments();
+      closeCommandMenu();
       resizeInput();
+      requestInFlight = true;
       send.disabled = true; input.disabled = true; status.textContent = "●  Thinking locally..."; send.querySelector(".send-label").textContent = "Thinking"; startThinking();
       try {
         const body = new FormData();
         body.append("message", message);
-        selectedFiles.forEach((file) => body.append("files", file, file.name));
+        files.forEach((file) => body.append("files", file, file.name));
         const response = await fetch(event.target.action, { method: "POST", body });
         const data = await response.json();
         if (response.ok) window.location.href = data.redirect;
         else throw new Error(data.error || "Could not send message.");
       } catch (error) {
-        pendingMessage.remove();
-        input.value = message;
-        resizeInput();
         stopThinking();
+        optimisticMessage.remove();
+        requestInFlight = false;
+        input.value = message;
+        selectedFiles = files;
+        renderAttachments();
+        resizeInput();
         alert(error.message || "Could not send message.");
         send.disabled = false; input.disabled = false; send.querySelector(".send-label").textContent = "Send";
         await refreshStatus();
@@ -387,53 +414,50 @@ PAGE = """
 
 def _markdown_html(text: str) -> str:
     escaped = escape(str(text))
-    return markdown.markdown(escaped, extensions=["fenced_code", "nl2br", "tables"], output_format="html5")
+    rendered = markdown.markdown(
+        escaped, extensions=["fenced_code", "nl2br", "tables"], output_format="html5"
+    )
+
+    # Python-Markdown escapes raw HTML but does not restrict URL schemes in
+    # generated links/images. Keep only harmless web/mail/relative URLs.
+    url_attribute = re.compile(r"(?P<name>href|src)=(?P<quote>[\"'])(?P<value>.*?)(?P=quote)", re.IGNORECASE)
+
+    def safe_attribute(match: re.Match[str]) -> str:
+        value = unescape(match.group("value")).strip()
+        parsed = urlsplit(value)
+        scheme = parsed.scheme.casefold()
+        safe = (
+            scheme in {"", "http", "https", "mailto"}
+            and not value.startswith("//")
+        )
+        if not safe:
+            value = "#"
+        return f'{match.group("name")}="{escape(value, quote=True)}"'
+
+    return url_attribute.sub(safe_attribute, rendered)
 
 
 def create_app(brain: DeepDeepBrain, user_id: str) -> Flask:
     app = Flask(__name__)
-    state: dict[str, Any] = {"loaded": brain.model is not None and brain.tokenizer is not None, "error": None}
-    model_lock = threading.Lock()
-    memory_lock = threading.Lock()
-    executor = ThreadPoolExecutor(max_workers=1)
-
-    def conversations() -> list[dict[str, str]]:
-        with memory_lock:
-            return brain.memory.list_conversations(user_id)
-
-    def ensure_conversation() -> str:
-        existing = conversations()
-        if existing:
-            return existing[0]["conversation_id"]
-        with memory_lock:
-            return brain.memory.create_conversation(user_id)
-
-    def load_model() -> None:
-        try:
-            brain.load_model()
-            state["loaded"] = True
-        except Exception as exc:
-            state["error"] = str(exc)
-
-    if not state["loaded"]:
-        executor.submit(load_model)
+    service = ConversationService(brain, user_id)
+    app.extensions["deepdeep_service"] = service
+    service.start_model_loading()
 
     @app.get("/")
     def index() -> str:
-        all_conversations = conversations()
+        all_conversations = service.list_conversations()
         if not all_conversations:
-            current_id = ensure_conversation()
-            all_conversations = conversations()
+            current_id = service.ensure_conversation()
+            all_conversations = service.list_conversations()
         else:
             current_id = request.args.get("conversation_id") or all_conversations[0]["conversation_id"]
         if not any(item["conversation_id"] == current_id for item in all_conversations):
             return redirect(url_for("index"))
-        with memory_lock:
-            messages = brain.memory.conversation_messages(current_id, 1000)
+        messages = service.conversation_messages(current_id)
         return render_template_string(
-            PAGE, conversations=conversations(), current_id=current_id, messages=messages,
-            loaded=state["loaded"], status="Local · ready" if state["loaded"] else ("Could not load the model" if state["error"] else "Warming up local model..."),
-            prompts=["Help me think through an idea", "Turn these notes into a clear plan", "Explain this simply: "],
+            PAGE, conversations=all_conversations, current_id=current_id, messages=messages,
+            loaded=service.loaded, status=service.status,
+            prompts=["Help me untangle an idea", "Turn these notes into a clear plan", "Explain this simply: "],
             commands=GUI_COMMANDS,
             markdown=_markdown_html, bg=BG, sidebar=SIDEBAR, panel=PANEL, ink=INK, muted=MUTED,
             line=LINE, accent=ACCENT, accent_dark=ACCENT_DARK,
@@ -441,25 +465,27 @@ def create_app(brain: DeepDeepBrain, user_id: str) -> Flask:
 
     @app.get("/status")
     def status() -> Any:
-        return jsonify(loaded=state["loaded"], status="Local · ready" if state["loaded"] else ("Could not load the model" if state["error"] else "Warming up local model..."), error=state["error"])
+        return jsonify(loaded=service.loaded, status=service.status, error=service.state["error"])
 
     @app.post("/conversations/new")
     def new_conversation() -> Any:
-        with memory_lock:
-            conversation_id = brain.memory.create_conversation(user_id)
+        conversation_id = service.create_conversation()
         return redirect(url_for("index", conversation_id=conversation_id))
 
     @app.post("/conversations/<conversation_id>/delete")
     def delete_conversation(conversation_id: str) -> Any:
-        with memory_lock:
-            brain.memory.delete_conversation(user_id, conversation_id)
+        try:
+            service.delete_conversation(conversation_id)
+        except ConversationNotFound:
+            return jsonify(error="Conversation not found"), 404
         return redirect(url_for("index"))
 
     @app.post("/conversations/<conversation_id>/rename")
     def rename_conversation(conversation_id: str) -> Any:
         try:
-            with memory_lock:
-                brain.memory.rename_conversation(user_id, conversation_id, request.form.get("title", ""))
+            service.rename_conversation(conversation_id, request.form.get("title", ""))
+        except ConversationNotFound:
+            return jsonify(error="Conversation not found"), 404
         except ValueError as exc:
             return jsonify(error=str(exc)), 400
         return redirect(url_for("index", conversation_id=conversation_id))
@@ -470,66 +496,16 @@ def create_app(brain: DeepDeepBrain, user_id: str) -> Flask:
         message = str(payload.get("message", "")).strip()
         if not message:
             return jsonify(error="Message cannot be empty"), 400
-        if message == "/clear":
-            with memory_lock:
-                brain.memory.clear_history(user_id)
-            return jsonify(redirect=url_for("index", conversation_id=conversation_id))
-        if message == "/sources":
-            sources = brain.rag.sources()
-            reply = "\n".join(sources) if sources else "No local documents indexed."
-            with memory_lock:
-                brain.memory.add_message(user_id, conversation_id, "user", message)
-                brain.memory.add_message(user_id, conversation_id, "assistant", reply)
-            return jsonify(redirect=url_for("index", conversation_id=conversation_id))
-        if message.startswith("/remember "):
-            key, separator, value = message[len("/remember ") :].partition("=")
-            if not separator or not key.strip() or not value.strip():
-                return jsonify(error="Use /remember key=value"), 400
-            brain.remember_fact(user_id, key.strip(), value.strip())
-            with memory_lock:
-                brain.memory.add_message(user_id, conversation_id, "user", message)
-                brain.memory.add_message(user_id, conversation_id, "assistant", "Remembered that for you.")
-            return jsonify(redirect=url_for("index", conversation_id=conversation_id))
-        if message.startswith("/add "):
-            try:
-                path = Path(shlex.split(message[len("/add ") :])[0]).expanduser().resolve()
-                count = brain.rag.add_file(path)
-            except (IndexError, OSError, ValueError) as exc:
-                return jsonify(error=f"Could not index that file: {exc}"), 400
-            reply = f"Indexed {count} chunk(s) from {path}."
-            with memory_lock:
-                brain.memory.add_message(user_id, conversation_id, "user", message)
-                brain.memory.add_message(user_id, conversation_id, "assistant", reply)
-            return jsonify(redirect=url_for("index", conversation_id=conversation_id))
-        if not state["loaded"]:
-            return jsonify(error=state["error"] or "The model is still warming up"), 503
-        attachments = []
-        for uploaded in request.files.getlist("files"):
-            filename = Path(uploaded.filename or "").name
-            if not filename:
-                continue
-            if Path(filename).suffix.lower() not in ATTACHMENT_EXTENSIONS:
-                return jsonify(error=f"Unsupported attachment type: {filename}"), 400
-            content = uploaded.read(MAX_ATTACHMENT_BYTES + 1)
-            if len(content) > MAX_ATTACHMENT_BYTES:
-                return jsonify(error=f"Attachment is too large (2 MB maximum): {filename}"), 400
-            try:
-                text = content.decode("utf-8")
-            except UnicodeDecodeError:
-                return jsonify(error=f"Attachment must be UTF-8 text: {filename}"), 400
-            attachments.append({"name": filename, "text": text})
         try:
-            with model_lock:
-                brain.chat(user_id, conversation_id, message, attachments=attachments)
+            service.handle_message(conversation_id, message, request.files.getlist("files"))
+        except ConversationNotFound:
+            return jsonify(error="Conversation not found"), 404
+        except (AttachmentError, ModelUnavailable, ValueError) as exc:
+            status_code = 503 if isinstance(exc, ModelUnavailable) else 400
+            return jsonify(error=str(exc)), status_code
         except Exception as exc:
             return jsonify(error=str(exc)), 500
         return jsonify(redirect=url_for("index", conversation_id=conversation_id))
-
-    @app.teardown_appcontext
-    def close_executor(_exception: BaseException | None) -> None:
-        # Flask's development server keeps the process alive, so the executor is
-        # intentionally not shut down for each request.
-        return None
 
     return app
 
@@ -537,7 +513,8 @@ def create_app(brain: DeepDeepBrain, user_id: str) -> Flask:
 def run_gui(brain: DeepDeepBrain, user_id: str) -> None:
     """Run the local web interface."""
     app = create_app(brain, user_id)
+    service: ConversationService = app.extensions["deepdeep_service"]
     try:
         app.run(host="127.0.0.1", port=5000, threaded=True)
     finally:
-        brain.close()
+        service.close()

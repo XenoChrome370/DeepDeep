@@ -62,7 +62,7 @@ def run_cli(brain: DeepDeepBrain, user_id: str) -> None:
                 print(HELP)
                 continue
             if text == "/clear":
-                brain.memory.clear_history(user_id)
+                brain.memory.clear_history(user_id, conversation_id)
                 print("DeepDeep: conversation history cleared.\n")
                 continue
             if text == "/sources":
