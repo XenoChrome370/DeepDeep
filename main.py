@@ -4,7 +4,7 @@ Examples:
   python main.py --check
   python main.py --download-model       # one-time internet setup
   python main.py                        # offline terminal chat
-  python main.py --gui                  # offline desktop chat
+  python main.py --gui                  # offline Flask web chat
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from gui import run_gui
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DeepDeep, a private local AI assistant")
-    parser.add_argument("--gui", action="store_true", help="open the desktop interface")
+    parser.add_argument("--gui", action="store_true", help="start the Flask web interface")
     parser.add_argument("--user", default="local_user", help="name of the local memory profile")
     parser.add_argument("--check", action="store_true", help="check setup without loading the model")
     parser.add_argument("--download-model", action="store_true", help="download the model once")
@@ -50,10 +50,11 @@ def main() -> int:
             print("Model downloaded and loaded successfully.")
             brain.close()
             return 0
-        brain.load_model()
         if args.gui:
+            # The web server starts immediately; gui.py loads the model in its own thread.
             run_gui(brain, args.user)
         else:
+            brain.load_model()
             run_cli(brain, args.user)
         return 0
     except KeyboardInterrupt:
@@ -69,4 +70,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

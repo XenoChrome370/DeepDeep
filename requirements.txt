@@ -2,4 +2,5 @@ torch>=2.2
 transformers>=4.45
 huggingface-hub>=0.24
 colorama>=0.4.6
-
+Markdown>=3.7
+Flask>=3.0

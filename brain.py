@@ -55,6 +55,17 @@ class DeepDeepBrain:
         download = ALLOW_DOWNLOAD if allow_download is None else allow_download
         local_only = not download
         source = Path(self.model_source).expanduser() if MODEL_PATH else self.model_source
+        if local_only and not MODEL_PATH:
+            # Some transformers versions still hit the network with local_files_only
+            # for repo ids; resolving to the cached snapshot path keeps loading offline.
+            try:
+                from huggingface_hub import snapshot_download
+
+                source = Path(
+                    snapshot_download(str(source), local_files_only=True)
+                )
+            except Exception:
+                pass  # fall through: from_pretrained raises the descriptive error
         kwargs = {"local_files_only": local_only}
         if self.device == "cpu":
             kwargs["dtype"] = torch.float32
@@ -75,7 +86,7 @@ class DeepDeepBrain:
         self.model.to(self.device)
         self.model.eval()
 
-    def _build_messages(self, user_id: str, user_message: str) -> List[Dict[str, str]]:
+    def _build_messages(self, user_id: str, conversation_id: str, user_message: str) -> List[Dict[str, str]]:
         system = SYSTEM_PROMPT
         facts = self.memory.facts(user_id)
         if facts:
@@ -88,15 +99,15 @@ class DeepDeepBrain:
                 f"[{doc['source']}]\n{doc['text']}" for doc in retrieved
             )
         messages = [{"role": "system", "content": system}]
-        messages.extend(self.memory.recent_messages(user_id, CONTEXT_TURNS * 2))
+        messages.extend(self.memory.conversation_messages(conversation_id, CONTEXT_TURNS * 2))
         messages.append({"role": "user", "content": user_message})
         return messages
 
     @torch.inference_mode()
-    def generate(self, user_id: str, user_message: str) -> str:
+    def generate(self, user_id: str, conversation_id: str, user_message: str) -> str:
         if self.model is None or self.tokenizer is None:
             raise RuntimeError("The model is not loaded")
-        messages = self._build_messages(user_id, user_message)
+        messages = self._build_messages(user_id, conversation_id, user_message)
         prompt = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
@@ -129,12 +140,12 @@ class DeepDeepBrain:
                     self.memory.set_fact(user_id, key, value)
                     break
 
-    def chat(self, user_id: str, user_message: str) -> str:
+    def chat(self, user_id: str, conversation_id: str, user_message: str) -> str:
         self.memory.upsert_user(user_id)
         self._extract_facts(user_id, user_message)
-        reply = self.generate(user_id, user_message)
-        self.memory.add_message(user_id, "user", user_message)
-        self.memory.add_message(user_id, "assistant", reply)
+        reply = self.generate(user_id, conversation_id, user_message)
+        self.memory.add_message(user_id, conversation_id, "user", user_message)
+        self.memory.add_message(user_id, conversation_id, "assistant", reply)
         return reply
 
     def remember_fact(self, user_id: str, key: str, value: str) -> None:

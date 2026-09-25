@@ -40,6 +40,12 @@ def type_response(text: str, delay: float = TYPE_DELAY) -> None:
 
 def run_cli(brain: DeepDeepBrain, user_id: str) -> None:
     print(f"{Fore.GREEN}DeepDeep is ready.{Style.RESET_ALL} Type /help for commands; /quit to exit.\n")
+    conversations = brain.memory.list_conversations(user_id)
+    conversation_id = (
+        conversations[0]["conversation_id"]
+        if conversations
+        else brain.memory.create_conversation(user_id)
+    )
     try:
         while True:
             try:
@@ -81,9 +87,8 @@ def run_cli(brain: DeepDeepBrain, user_id: str) -> None:
                     print(f"DeepDeep: could not index that file: {exc}\n")
                 continue
             try:
-                type_response(brain.chat(user_id, text))
+                type_response(brain.chat(user_id, conversation_id, text))
             except Exception as exc:
                 print(f"DeepDeep: I hit an error: {exc}\n")
     finally:
         brain.close()
-
