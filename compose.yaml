@@ -1,0 +1,16 @@
+services:
+  deepdeep:
+    build: .
+    image: deepdeep:local
+    ports:
+      - "5000:5000"
+    environment:
+      DEEPDEEP_ALLOW_DOWNLOAD: "0"
+      DEEPDEEP_DEVICE: "cpu"
+    volumes:
+      - ./data:/app/data
+      - deepdeep-model-cache:/root/.cache/huggingface
+    restart: unless-stopped
+
+volumes:
+  deepdeep-model-cache:

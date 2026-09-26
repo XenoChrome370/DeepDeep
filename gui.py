@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from html import escape, unescape
+import os
 import re
 from typing import Any
 from urllib.parse import urlsplit
@@ -515,6 +516,8 @@ def run_gui(brain: DeepDeepBrain, user_id: str) -> None:
     app = create_app(brain, user_id)
     service: ConversationService = app.extensions["deepdeep_service"]
     try:
-        app.run(host="127.0.0.1", port=5000, threaded=True)
+        host = os.environ.get("DEEPDEEP_HOST", "127.0.0.1")
+        port = int(os.environ.get("DEEPDEEP_PORT", "5000"))
+        app.run(host=host, port=port, threaded=True)
     finally:
         service.close()
